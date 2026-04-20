@@ -1,4 +1,4 @@
-const API_BASE_URL = "https://bucketing-tool.onrender.com";
+const API_BASE_URL = "http://127.0.0.1:8000";
 console.info("Bucketing API base URL:", API_BASE_URL);
 const STORAGE_THEME_KEY = "bucketing-theme";
 
