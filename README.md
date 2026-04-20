@@ -1,12 +1,12 @@
 # Bucketing Assistant
 
-A premium SaaS-quality application for intelligent classification and bucketing. Uses fuzzy matching with an Excel database, falling back to AI (Groq) for unknown inputs. Each factor receives independent bucket classification.
+A premium SaaS-quality application for intelligent classification and bucketing. Uses hybrid fuzzy matching, sentence-transformer embeddings, and DB-only bucket selection. Each factor receives independent bucket classification.
 
 ## 🎯 Features
 
-- **Smart Fuzzy Matching**: RapidFuzz-based text matching against Excel database
-- **Confidence Scoring**: Multi-component scoring (category + factor) with threshold gating
-- **AI Fallback**: Groq API integration for unmatched inputs with novel bucket enforcement
+- **Hybrid Matching**: RapidFuzz plus sentence-transformer embeddings against the Excel database
+- **Confidence Scoring**: Multi-component scoring across category alignment, factor similarity, and bucket support
+- **AI Guardrail**: Groq only chooses from already-existing DB bucket names
 - **Multi-Factor Support**: Process multiple factors independently with per-factor bucket results
 - **Premium UI**: Modern, minimal SaaS-quality interface with dark mode and smooth interactions
 - **Responsive Design**: Works seamlessly on desktop and mobile
@@ -18,16 +18,17 @@ User Input (Category + Factors)
     ↓
 FastAPI Backend (http://127.0.0.1:8000)
     ↓
-RapidFuzz Matching (Token Set Ratio)
+Hybrid Retrieval (RapidFuzz + Sentence Transformer Embeddings)
     ↓
-Confidence Score Calculation
-    ├─ Category Score ≥ 55
-    ├─ Factor Score ≥ 55
-    └─ Total Score ≥ 120
+Composite Confidence Calculation
+  ├─ Category alignment
+  ├─ Factor semantic similarity
+  ├─ Bucket semantic support
+  └─ Bucket-level support bonus
     ↓
 Decision
-├─ ✅ All gates pass → Return Database Match
-└─ ❌ Any gate fails → Call Groq AI for Novel Bucket
+├─ ✅ Confidence passes → Return Database Match bucket
+└─ ❌ Any gate fails → Call Groq AI to choose from DB buckets only
     ↓
 Response with Per-Factor Results
     ↓
@@ -82,11 +83,33 @@ Frontend (http://127.0.0.1:5500)
 
 ## ▶️ Running the Application
 
+### Fast Run (Windows PowerShell)
+
+Use this when you want to start both services quickly from the project root:
+
+```powershell
+# Terminal 1 (Backend) - IMPORTANT: run from backend folder
+cd backend
+venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+
+# Terminal 2 (Frontend) - from project root
+cd ..
+python -m http.server 5500 --directory frontend
+```
+
+Why this matters:
+- `loader.py` reads `data/Master_DB_Clean.xlsx` using a relative path.
+- Backend must be started from `backend/` so `data/...` resolves correctly.
+
+Open:
+- Frontend: **http://127.0.0.1:5500**
+- Backend docs: **http://127.0.0.1:8000/docs**
+
 ### Terminal 1: Start Backend Server
 
 ```bash
 cd backend
-python -m uvicorn main:app --reload
+python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 This starts the API server on **http://127.0.0.1:8000**
@@ -114,6 +137,14 @@ Serving HTTP on 127.0.0.1 port 5500
 
 Navigate to **http://127.0.0.1:5500** and start classifying!
 
+### Optional: One-liner launch (detached)
+
+If you want both servers launched in the background from one PowerShell command:
+
+```powershell
+Start-Process -FilePath ".\backend\venv\Scripts\python.exe" -ArgumentList @("-m","uvicorn","main:app","--host","127.0.0.1","--port","8000") -WorkingDirectory ".\backend"; Start-Process -FilePath "python" -ArgumentList @("-m","http.server","5500","--directory","frontend") -WorkingDirectory "."
+```
+
 ## 📁 Project Structure
 
 ```
@@ -124,8 +155,8 @@ Bucketing/
 │   │   └── Master_DB_Clean.xlsx       # Database file (your data)
 │   ├── main.py                        # FastAPI application
 │   ├── loader.py                      # Excel data loader
-│   ├── matcher.py                     # Fuzzy matching engine
-│   ├── utils.py                       # AI fallback utilities
+│   ├── matcher.py                     # Hybrid matching engine
+│   ├── utils.py                       # AI bucket guardrail utilities
 │   ├── requirements.txt               # Dependencies
 │   └── .env                           # Groq API key (not in git)
 └── frontend/
@@ -144,28 +175,26 @@ Bucketing/
 
 ### 2. **Matching Engine** (`matcher.py`)
 - **Normalization**: Removes special characters, standardizes whitespace, lowercases text
-- **Fuzzy Matching**: Uses `token_set_ratio` (stricter than partial matching)
-- **Scoring**:
-  - `category_score` = fuzzy match with row category
-  - `factor_score` = average of all input factor matches
-  - `total_score` = category_score + factor_score
+- **Fuzzy Matching**: Uses a composite RapidFuzz score (`ratio`, `partial`, `token_sort`, `token_set`, `WRatio`)
+- **Semantic Matching**: Sentence-transformer embeddings rank factor similarity and category alignment
+- **Bucket Intelligence**: Bucket centroids and bucket support boost consistent DB-backed decisions
 - **Per-Factor Processing**: Each factor is matched independently
 
 ### 3. **Threshold Gating**
 ```python
-THRESHOLD = 120              # Minimum total score
-CATEGORY_MIN_SCORE = 55      # Category must meet threshold
-FACTOR_MIN_SCORE = 55        # Factors must meet threshold
+HIGH_CONFIDENCE = 0.8
+MEDIUM_CONFIDENCE = 0.6
+SHORT_CIRCUIT_EMBEDDING = 0.9
 ```
 
-- ✅ If ALL scores pass → Return database result
-- ❌ If ANY score fails → Call Groq AI
+- ✅ If confidence is strong → Return database bucket result
+- ❌ If confidence is weaker → Use Groq only as a selector among existing DB buckets
 
 ### 4. **AI Fallback** (`utils.py`)
 - Calls Groq API (llama-3.3-70b-versatile)
-- Enforces novel bucket names (not in existing database)
-- Retry logic: 2 attempts if model returns existing bucket
-- Fallback response if retries exhausted: `"Novel_AI_Bucket"`
+- Only accepts bucket names that already exist in the database
+- Normalizes model output before validating against the allowed bucket list
+- Falls back to `UNMAPPED_REVIEW_REQUIRED` when no DB bucket is safe to use
 
 ### 5. **API Response Format**
 ```json
@@ -178,9 +207,10 @@ FACTOR_MIN_SCORE = 55        # Factors must meet threshold
       "category": "finance",
       "factor": "risk of money",
       "bucket": "Risk Metrics",
-      "confidence_score": 157.14,
-      "category_score": 100.0,
-      "factor_score": 57.14
+      "confidence_score": 0.91,
+      "final_score": 0.91,
+      "embedding_score": 0.96,
+      "fuzz_score": 0.88
     },
     {
       "factor_input": "trust",
@@ -239,7 +269,7 @@ Column names are case-insensitive and auto-normalized.
 2. Open http://127.0.0.1:5500
 3. Try:
    - **Known input**: Category that matches your Excel data
-   - **Unknown input**: Random category to trigger AI
+  - **Unknown input**: Random category to trigger DB-only AI bucket selection
 
 ### Test via API (PowerShell)
 ```powershell
@@ -281,7 +311,7 @@ Could not connect to the backend. Make sure the server is running on port 8000.
 
 ### Results show wrong bucket
 - **Fix**: Check confidence scores in API response
-- **Fix**: Adjust `THRESHOLD`, `CATEGORY_MIN_SCORE`, `FACTOR_MIN_SCORE` in `backend/main.py`
+- **Fix**: Adjust `HIGH_CONFIDENCE`, `MEDIUM_CONFIDENCE`, `SHORT_CIRCUIT_EMBEDDING` in `backend/main.py`
 - **Fix**: Verify data in Excel file is correct
 
 ## 📦 Dependencies

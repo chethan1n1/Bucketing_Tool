@@ -5,3 +5,6 @@ openpyxl
 rapidfuzz
 groq
 python-dotenv
+numpy
+faiss-cpu
+sentence-transformers

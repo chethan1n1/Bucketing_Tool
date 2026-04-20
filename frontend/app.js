@@ -1,4 +1,5 @@
-const API_BASE_URL = "https://bucketing-tool.onrender.com";
+const API_BASE_URL = "http://127.0.0.1:8000";
+console.info("Bucketing API base URL:", API_BASE_URL);
 const STORAGE_THEME_KEY = "bucketing-theme";
 
 const form = document.getElementById("predict-form");
@@ -7,6 +8,7 @@ const factorsInput = document.getElementById("factors");
 const submitBtn = document.getElementById("submit-btn");
 const resultCard = document.getElementById("result-card");
 const resultCategory = document.getElementById("result-category");
+const resultStatus = document.getElementById("result-status");
 const resultClose = document.getElementById("result-close");
 const resetBtn = document.getElementById("reset-btn");
 const resultsBody = document.getElementById("results-tbody");
@@ -30,6 +32,7 @@ submitAttempted: false,
 };
 
 let latestResultData = null;
+let matchingStatusTimer = null;
 
 function parseFactors(raw) {
 return raw
@@ -119,6 +122,44 @@ function clearResults() {
 resultsBody.innerHTML = "";
 }
 
+function setResultStatus(text, isLoading = false) {
+if (!resultStatus) return;
+resultStatus.textContent = text || "";
+resultStatus.hidden = !text;
+resultStatus.classList.toggle("is-loading", Boolean(text) && isLoading);
+}
+
+function stopMatchingStatus() {
+if (matchingStatusTimer) {
+clearInterval(matchingStatusTimer);
+matchingStatusTimer = null;
+}
+}
+
+function startMatchingStatus(category, totalFactors) {
+stopMatchingStatus();
+
+const total = Math.max(1, Number(totalFactors) || 1);
+let current = 0;
+
+resultCategory.textContent = category || "Analyzing";
+setResultStatus(`Matching ${current}/${total} factors...`, true);
+
+resultCard.hidden = false;
+setResultsLayout(true);
+requestAnimationFrame(() => resultCard.classList.add("visible"));
+
+const tickMs = Math.max(90, Math.min(260, Math.floor(2600 / total)));
+matchingStatusTimer = setInterval(() => {
+if (current < total - 1) {
+current += 1;
+setResultStatus(`Matching ${current}/${total} factors...`, true);
+return;
+}
+setResultStatus("Finalizing bucket decisions...", true);
+}, tickMs);
+}
+
 function escapeXml(value) {
 return String(value)
 .replace(/&/g, "&amp;")
@@ -150,7 +191,14 @@ function getExportRows(data) {
 const rows = Array.isArray(data?.results) ? data.results : [];
 return rows.map((item) => ({
 factor: item.factor_input || item.factor || "",
-source: item.source === "database" ? "Database" : "AI",
+source:
+item.source === "database"
+? "Database"
+: item.source === "ai_assisted"
+? "AI Assisted"
+: item.source === "unmapped"
+? "Unmapped"
+: "AI",
 bucket: item.bucket || "",
 }));
 }
@@ -464,6 +512,8 @@ function setResultsLayout(enabled) {
 function hideResults() {
 resultCard.classList.remove("visible");
 	setResultsLayout(false);
+stopMatchingStatus();
+setResultStatus("");
 latestResultData = null;
 updateDownloadButtons();
 setTimeout(() => {
@@ -485,22 +535,64 @@ emptyState.hidden = true;
 
 function displayResults(data) {
 const results = Array.isArray(data.results) ? data.results : [];
+const normalizedResultCategory = String(data.category || "").trim().toLowerCase();
 latestResultData = {
 category: data.category || "",
 results,
 };
+stopMatchingStatus();
+setResultStatus(`Matched ${results.length}/${results.length} factors`, false);
 updateDownloadButtons();
 
 resultCategory.textContent = data.category || "Unknown category";
 clearResults();
 
-results.forEach((item, index) => {
+const ordered = [...results].sort((a, b) => {
+const aCategory = String(a.category || "").toLowerCase();
+const bCategory = String(b.category || "").toLowerCase();
+if (aCategory !== bCategory) return aCategory.localeCompare(bCategory);
+
+const aSub = String(a.subcategory || "").toLowerCase();
+const bSub = String(b.subcategory || "").toLowerCase();
+if (aSub !== bSub) return aSub.localeCompare(bSub);
+
+const aOrder = Number.isFinite(Number(a.sort_order)) ? Number(a.sort_order) : Number.MAX_SAFE_INTEGER;
+const bOrder = Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : Number.MAX_SAFE_INTEGER;
+return aOrder - bOrder;
+});
+
+let currentGroup = "";
+
+ordered.forEach((item, index) => {
+	const groupParts = [item.category, item.subcategory]
+		.map((value) => String(value || "").trim())
+		.filter(Boolean);
+	const groupLabel = groupParts.join(" > ");
+	const normalizedGroupLabel = groupLabel.trim().toLowerCase();
+	if (groupLabel && groupLabel !== currentGroup && normalizedGroupLabel !== normalizedResultCategory) {
+		currentGroup = groupLabel;
+		const groupRow = document.createElement("tr");
+		groupRow.classList.add("visible");
+		groupRow.innerHTML = `<td colspan="3"><strong>${escapeHtml(groupLabel)}</strong></td>`;
+		resultsBody.appendChild(groupRow);
+	}
+
 const row = document.createElement("tr");
+	const sourceType = item.source === "database"
+		? "database"
+		: item.source === "ai_assisted"
+		? "ai"
+		: "unmapped";
+	const sourceLabel = item.source === "database"
+		? "Database"
+		: item.source === "ai_assisted"
+		? "AI Assisted"
+		: "Unmapped";
 row.innerHTML = `
 <td>${escapeHtml(item.factor_input || "")}</td>
 <td>
-<span class="source-badge ${item.source === "database" ? "database" : "ai"}">
-${item.source === "database" ? "Database" : "AI"}
+<span class="source-badge ${sourceType}">
+${sourceLabel}
 </span>
 </td>
 <td><span class="bucket-name">${escapeHtml(item.bucket || "-")}</span></td>
@@ -527,10 +619,12 @@ resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
 
 async function predictBucket(category, factors) {
 setLoading(true);
+startMatchingStatus(category, factors.length);
 
 try {
 const response = await fetch(`${API_BASE_URL}/predict`, {
 method: "POST",
+cache: "no-store",
 headers: {
 "Content-Type": "application/json",
 },
@@ -552,6 +646,7 @@ error.message === "Failed to fetch"
 : error.message || "Something went wrong while classifying."
 );
 } finally {
+stopMatchingStatus();
 setLoading(false);
 }
 }
